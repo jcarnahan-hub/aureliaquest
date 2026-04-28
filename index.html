@@ -571,13 +571,12 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);color:var(--text);min-
 <!-- ══════════════════════════════════════
      FIREBASE AUTH
 ══════════════════════════════════════ -->
-<script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getAuth, GoogleAuthProvider, signInWithRedirect, getRedirectResult, signOut as fbSignOut, onAuthStateChanged }
-  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-import { getFirestore, doc, getDoc, setDoc, serverTimestamp }
-  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script src="https://www.googleapis.com/auth/firebase"></script>
 
+<script>
 const firebaseConfig = {
   apiKey:"AIzaSyChW4xXFj1RCoc6VhLpMICF-cH1_8SQGKg",
   authDomain:"aureliaquest.firebaseapp.com",
@@ -588,24 +587,35 @@ const firebaseConfig = {
   measurementId:"G-FDBCPJNQQC"
 };
 
-const fbApp = initializeApp(firebaseConfig);
-const auth = getAuth(fbApp);
-const db = getFirestore(fbApp);
-const provider = new GoogleAuthProvider();
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.firestore();
+const provider = new firebase.auth.GoogleAuthProvider();
 
 let currentUser = null;
 let userData = {totalScore:0,gamesPlayed:0,badges:[],activity:[],bestScores:{},streak:0};
 
+// Sign in with popup — works reliably on all browsers
 window.signInWithGoogle = async () => {
   const errEl = document.getElementById('signin-error');
-  if(errEl) errEl.textContent = 'Redirecting to Google...';
-  try { await signInWithRedirect(auth, provider); }
-  catch(e) { if(errEl) errEl.textContent = 'Error: ' + e.message; }
+  if(errEl) errEl.textContent = 'Opening Google sign-in...';
+  try {
+    const result = await auth.signInWithPopup(provider);
+    console.log('Signed in:', result.user.email);
+  } catch(e) {
+    console.error('Sign-in error:', e.code, e.message);
+    if(errEl) errEl.textContent = 'Error: ' + e.code;
+    // If popup blocked, try redirect
+    if(e.code === 'auth/popup-blocked' || e.code === 'auth/popup-closed-by-user') {
+      if(errEl) errEl.textContent = 'Popup blocked — trying redirect...';
+      await auth.signInWithRedirect(provider);
+    }
+  }
 };
 
 window.doSignOut = async () => {
   if(confirm('Sign out of AureliaQuest?')) {
-    await fbSignOut(auth);
+    await auth.signOut();
   }
 };
 
@@ -618,11 +628,11 @@ window.saveScore = async (game, score, mode) => {
   userData.activity = [{game,score,mode,time:new Date().toISOString()}, ...userData.activity].slice(0,20);
   checkBadges(game, score);
   try {
-    await setDoc(doc(db,'users',currentUser.uid),{
+    await db.collection('users').doc(currentUser.uid).set({
       totalScore:userData.totalScore, gamesPlayed:userData.gamesPlayed,
       badges:userData.badges, activity:userData.activity,
       bestScores:userData.bestScores, streak:userData.streak,
-      name:currentUser.displayName, updatedAt:serverTimestamp()
+      name:currentUser.displayName, updatedAt:firebase.firestore.FieldValue.serverTimestamp()
     });
   } catch(e) { console.warn('Save failed:', e.code); }
   updateHubUI();
@@ -640,7 +650,7 @@ const BADGES = [
   {id:'hearth_keeper',icon:'🏰',name:'Hearth Keeper',desc:'Play The Arcane Hearth'},
   {id:'starfall',icon:'☄️',name:'Starfall!',desc:'Score a STARFALL in Dice'},
   {id:'dice_master',icon:'🎲',name:'Dice Master',desc:'Score 200+ in Starfall Dice'},
-  {id:'dual_quest',icon:'⚔️',name:'Dual Quest',desc:'Play all 4 games'},
+  {id:'dual_quest',icon:'⚔️',name:'Dual Quest',desc:'Play all games'},
   {id:'thousand_pts',icon:'👑',name:'Royalty',desc:'Reach 1000 total points'},
 ];
 window.BADGES = BADGES;
@@ -661,43 +671,30 @@ function checkBadges(game, score) {
   if(userData.totalScore>=1000) earn('thousand_pts');
 }
 
-// Show loading state immediately — don't flash sign-in while checking auth
-document.getElementById('screen-signin').style.display = 'none';
-document.getElementById('screen-signin').classList.remove('active');
-
-// First check redirect result BEFORE setting up auth listener
-getRedirectResult(auth).then(result => {
-  if(result?.user) {
-    // Redirect sign-in succeeded — onAuthStateChanged will handle it
-    console.log('Redirect result: signed in as', result.user.email);
-  }
+// Handle redirect result first
+auth.getRedirectResult().then(result => {
+  if(result && result.user) console.log('Redirect sign-in OK:', result.user.email);
 }).catch(e => {
-  console.warn('Redirect result error:', e.code, e.message);
-  const errEl = document.getElementById('signin-error');
-  if(errEl) errEl.textContent = 'Auth error: ' + e.code;
+  console.warn('Redirect result:', e.code);
 });
 
-onAuthStateChanged(auth, async (user) => {
+auth.onAuthStateChanged(async (user) => {
   if(user) {
     currentUser = user;
     try {
-      const snap = await getDoc(doc(db,'users',user.uid));
-      if(snap.exists()) userData = {...userData, ...snap.data()};
+      const snap = await db.collection('users').doc(user.uid).get();
+      if(snap.exists) userData = {...userData, ...snap.data()};
     } catch(e) { console.warn('Load failed:', e.code); }
-    // Show hub
     document.getElementById('screen-signin').style.display = 'none';
     document.getElementById('screen-signin').classList.remove('active');
     document.getElementById('screen-hub').style.display = 'block';
     document.getElementById('screen-hub').classList.add('active');
     updateHubUI();
   } else {
-    // Not signed in — show sign in screen
     document.getElementById('screen-signin').style.display = 'flex';
     document.getElementById('screen-signin').classList.add('active');
     document.getElementById('screen-hub').style.display = 'none';
     document.getElementById('screen-hub').classList.remove('active');
-    const errEl = document.getElementById('signin-error');
-    if(errEl && !errEl.textContent) errEl.textContent = 'Ready to sign in.';
   }
 });
 
@@ -744,8 +741,8 @@ function renderActivity() {
     return;
   }
   el.innerHTML = '';
-  const icons={market:'🛒',words:'💎',mahjong:'🦋',hearth:'🏰'};
-  const names={market:'Clover Market',words:'WordWeave',mahjong:'AureliaMahjong',hearth:'Arcane Hearth'};
+  const icons={market:'🛒',words:'💎',mahjong:'🦋',hearth:'🏰',dice:'🎲'};
+  const names={market:'Clover Market',words:'WordWeave',mahjong:'AureliaMahjong',hearth:'Arcane Hearth',dice:'Starfall Dice'};
   userData.activity.slice(0,5).forEach(a => {
     const row = document.createElement('div');
     row.className = 'activity-row';
